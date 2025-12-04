@@ -217,20 +217,9 @@ async def prog(c, t, C, h, m, st):
 
 async def send_direct(c, m, tcid, ft=None, rtmid=None):
     try:
-        if m.video:
-            await c.send_video(tcid, m.video.file_id, caption=ft, duration=m.video.duration, width=m.video.width, height=m.video.height, reply_to_message_id=rtmid)
-        elif m.video_note:
-            await c.send_video_note(tcid, m.video_note.file_id, reply_to_message_id=rtmid)
-        elif m.voice:
-            await c.send_voice(tcid, m.voice.file_id, reply_to_message_id=rtmid)
-        elif m.sticker:
-            await c.send_sticker(tcid, m.sticker.file_id, reply_to_message_id=rtmid)
-        elif m.audio:
-            await c.send_audio(tcid, m.audio.file_id, caption=ft, duration=m.audio.duration, performer=m.audio.performer, title=m.audio.title, reply_to_message_id=rtmid)
-        elif m.photo:
-            photo_id = m.photo.file_id if hasattr(m.photo, 'file_id') else m.photo[-1].file_id
-            await c.send_photo(tcid, photo_id, caption=ft, reply_to_message_id=rtmid)
-        elif m.document:
+        # Strict PDF check inside send_direct as a secondary safety measure
+        if m.document:
+             # We rely on the caller to check mime_type, but send_direct will simply forward documents.
             await c.send_document(tcid, m.document.file_id, caption=ft, file_name=m.document.file_name, reply_to_message_id=rtmid)
         else:
             return False
@@ -241,6 +230,20 @@ async def send_direct(c, m, tcid, ft=None, rtmid=None):
 
 async def process_msg(c, u, m, d, lt, uid, i):
     try:
+        # --- PDF FILTER CHECK ---
+        is_pdf = False
+        if m.document:
+            # Check for PDF MIME type or extension
+            if getattr(m.document, 'mime_type', '') == 'application/pdf':
+                is_pdf = True
+            elif getattr(m.document, 'file_name', '').lower().endswith('.pdf'):
+                is_pdf = True
+        
+        # If it's not a PDF, we skip it entirely
+        if not is_pdf:
+            return 'Skipped: Not a PDF.'
+        # ------------------------
+
         cfg_chat = await get_user_data_key(d, 'chat_id', None)
         tcid = d
         rtmid = None
@@ -263,7 +266,7 @@ async def process_msg(c, u, m, d, lt, uid, i):
                 return 'Sent directly.'
 
             st = time.time()
-            p = await c.send_message(d, 'Downloading...')
+            p = await c.send_message(d, 'Downloading PDF...')
 
             c_name = f"./downloads/{time.time()}"
             f = await u.download_media(m, file_name=c_name, progress=prog, progress_args=(c, d, p.id, st))
@@ -282,10 +285,8 @@ async def process_msg(c, u, m, d, lt, uid, i):
                 st = time.time()
                 await c.edit_message_text(d, p.id, 'File is larger than 2GB. Using alternative method...')
                 await upd_dlg(Y)
-                mtd = await get_video_metadata(f)
-                dur, h, w = mtd['duration'], mtd['width'], mtd['height']
-                th = await screenshot(f, dur, d)
-
+                
+                # PDF doesn't need video metadata extraction
                 sent = await Y.send_document(LOG_GROUP, f, thumb=th, caption=ft if m.caption else None,
                                                 reply_to_message_id=rtmid, progress=prog, progress_args=(c, d, p.id, st))
 
@@ -295,42 +296,14 @@ async def process_msg(c, u, m, d, lt, uid, i):
 
                 return 'Done (Large file).'
 
-            await c.edit_message_text(d, p.id, 'Uploading...')
+            await c.edit_message_text(d, p.id, 'Uploading PDF...')
             st = time.time()
 
             try:
-                if m.photo:
-                    await c.send_photo(tcid, photo=f, caption=ft,
-                                    progress=prog, progress_args=(c, d, p.id, st),
-                                    reply_to_message_id=rtmid)
-                elif m.video:
-                    mtd = await get_video_metadata(f)
-                    dur, h, w = mtd['duration'], mtd['width'], mtd['height']
-                    th = await screenshot(f, dur, d)
-                    await c.send_video(tcid, video=f, caption=ft,
-                                    thumb=th, width=w, height=h, duration=dur,
-                                    progress=prog, progress_args=(c, d, p.id, st),
-                                    reply_to_message_id=rtmid)
-                elif m.audio:
-                    await c.send_audio(tcid, audio=f, caption=ft,
+                # We only attempt to upload as a document since we filtered for PDF
+                await c.send_document(tcid, document=f, caption=ft,
                                     thumb=th, progress=prog, progress_args=(c, d, p.id, st),
                                     reply_to_message_id=rtmid)
-                elif m.voice:
-                    await c.send_voice(tcid, f, progress=prog, progress_args=(c, d, p.id, st),
-                                    reply_to_message_id=rtmid)
-                elif m.video_note:
-                    await c.send_video_note(tcid, video_note=f, progress=prog,
-                                        progress_args=(c, d, p.id, st), reply_to_message_id=rtmid)
-                elif m.sticker:
-                    await c.send_sticker(tcid, m.sticker.file_id, reply_to_message_id=rtmid)
-                elif m.document:
-                    await c.send_document(tcid, document=f, caption=ft,
-                                        progress=prog, progress_args=(c, d, p.id, st),
-                                        reply_to_message_id=rtmid)
-                else:
-                    await c.send_document(tcid, document=f, caption=ft,
-                                        progress=prog, progress_args=(c, d, p.id, st),
-                                        reply_to_message_id=rtmid)
 
             except Exception as e:
                 await c.edit_message_text(d, p.id, f'Upload failed: {str(e)[:30]}')
@@ -343,6 +316,10 @@ async def process_msg(c, u, m, d, lt, uid, i):
             return 'Done.'
 
         elif m.text:
+            # If you want to strictly process ONLY PDFs and ignore text messages too, 
+            # uncomment the following line:
+            # return 'Skipped: Text message.'
+            
             await c.send_message(tcid, text=m.text.markdown, reply_to_message_id=rtmid)
             return 'Sent.'
     except Exception as e:
